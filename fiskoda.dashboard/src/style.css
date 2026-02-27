@@ -24,3 +24,23 @@ body {
 #root {
   min-height: 100vh;
 }
+
+/* Dark scrollbar for modals and panels */
+.scrollbar-dark {
+  scrollbar-color: #4f545c #2c2f33;
+  scrollbar-width: thin;
+}
+.scrollbar-dark::-webkit-scrollbar {
+  width: 8px;
+}
+.scrollbar-dark::-webkit-scrollbar-track {
+  background: #2c2f33;
+  border-radius: 4px;
+}
+.scrollbar-dark::-webkit-scrollbar-thumb {
+  background: #4f545c;
+  border-radius: 4px;
+}
+.scrollbar-dark::-webkit-scrollbar-thumb:hover {
+  background: #5d6269;
+}

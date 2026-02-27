@@ -7,6 +7,7 @@ import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import VoiceSessionCard from '@/components/VoiceSessionCard'
 import VoiceSessionSkeleton from '@/components/VoiceSessionSkeleton'
+import PlaylistQueueModal from '@/components/PlaylistQueueModal'
 import { toast } from 'sonner'
 
 const icons = {
@@ -36,6 +37,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<BotStatusDto | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [queueModalGuild, setQueueModalGuild] = useState<{ guildId: string; guildName: string } | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -155,7 +157,11 @@ export default function DashboardPage() {
           ) : (
             <>
               {data?.voiceConnections?.map((conn) => (
-                <VoiceSessionCard key={conn.guildId} connection={conn} />
+                <VoiceSessionCard
+                  key={conn.guildId}
+                  connection={conn}
+                  onOpenQueue={(c) => setQueueModalGuild({ guildId: c.guildId, guildName: c.guildName ?? 'Server' })}
+                />
               ))}
               <div className="rounded-xl border-2 border-dashed border-[#40444b] bg-[#36393f]/50 p-8 flex items-center gap-4 text-[#b9bbbe]">
                 <span className="text-3xl font-light">+</span>
@@ -168,6 +174,15 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      {queueModalGuild && (
+        <PlaylistQueueModal
+          open={true}
+          onClose={() => setQueueModalGuild(null)}
+          guildId={queueModalGuild.guildId}
+          guildName={queueModalGuild.guildName}
+        />
+      )}
     </motion.div>
   )
 }

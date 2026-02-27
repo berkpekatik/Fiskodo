@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { useAuthStore } from '@/stores/authStore'
+import type { GuildQueueDto } from '@/types/api'
 
 const API_BASE = import.meta.env.VITE_API_URL ?? 'https://discord.vnoisy.dev'
 
@@ -24,5 +25,10 @@ api.interceptors.response.use(
     return Promise.reject(err)
   }
 )
+
+export async function getGuildQueue(guildId: string): Promise<GuildQueueDto> {
+  const { data } = await api.get<GuildQueueDto>(`/api/BotStatus/guilds/${guildId}/queue`)
+  return data
+}
 
 export default api

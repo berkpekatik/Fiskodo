@@ -18,6 +18,14 @@ export function formatLatency(value: string): string {
   return `${Math.round(ms)}ms`
 }
 
+/** Format duration in milliseconds as m:ss */
+export function formatDurationMs(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const m = Math.floor(totalSeconds / 60)
+  const s = totalSeconds % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
 function parseTimeSpan(s: string): { days: number; hours: number; minutes: number; seconds: number } | null {
   if (!s || typeof s !== 'string') return null
   const d = parseTimeSpanToMs(s)

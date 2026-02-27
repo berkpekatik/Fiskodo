@@ -31,14 +31,22 @@ public sealed class BotStatusController : ControllerBase
 
     /// <summary>One voice connection: bot is in this guild's voice channel.</summary>
     public sealed record VoiceConnectionDto(
-        ulong GuildId,
+        string GuildId,
         string? GuildName,
         string? GuildIconUrl,
         ulong ChannelId,
         string? ChannelName,
         /// <summary>Number of users in this voice channel (including the bot). 1 = bot alone.</summary>
         int UserCount,
+        /// <summary>How long the bot has been in this guild's voice channel. Null if not tracked.</summary>
+        TimeSpan? VoiceUptime,
         PlaybackInfoDto Playback);
+
+    /// <summary>Single track in the queue (for playlist/queue API).</summary>
+    public sealed record QueueItemDto(string Title, string? Author, long? DurationMs);
+
+    /// <summary>Current track and remaining queue for a guild.</summary>
+    public sealed record GuildQueueDto(string? NowPlayingTitle, IReadOnlyList<QueueItemDto> Remaining);
 
     public sealed record BotStatusDto(
         /// <summary>Discord user ID of the bot.</summary>
@@ -76,13 +84,17 @@ public sealed class BotStatusController : ControllerBase
             var (nowPlayingTitle, queueCount, isPlaylistSession, shuffle) = await _musicService.GetPlaybackStatusAsync(guildId, cancellationToken).ConfigureAwait(false);
             var playback = new PlaybackInfoDto(nowPlayingTitle, queueCount, isPlaylistSession, shuffle);
 
+            var joinedAt = _musicService.GetVoiceJoinedAt(guildId);
+            var voiceUptime = joinedAt.HasValue ? DateTimeOffset.UtcNow - joinedAt.Value : (TimeSpan?)null;
+
             voiceConnections.Add(new VoiceConnectionDto(
-                GuildId: guildId,
+                GuildId: guildId.ToString(),
                 GuildName: guild.Name,
                 GuildIconUrl: guild.GetIconUrl()?.ToString(),
                 ChannelId: channelId,
                 ChannelName: channelName,
                 UserCount: userCount,
+                VoiceUptime: voiceUptime,
                 Playback: playback));
         }
 
@@ -102,6 +114,22 @@ public sealed class BotStatusController : ControllerBase
             VoiceConnections: voiceConnections);
 
         return Ok(dto);
+    }
+
+    /// <summary>Get current track and remaining queue for a guild. Returns 404 if bot is not in voice in that guild.</summary>
+    [HttpGet("guilds/{guildId}/queue")]
+    public async Task<ActionResult<GuildQueueDto>> GetGuildQueue(string guildId, CancellationToken cancellationToken = default)
+    {
+        var botUserId = _client.Id;
+        if (!_client.Cache.Guilds.TryGetValue(ulong.Parse(guildId), out var guild))
+            return NotFound();
+        if (!guild.VoiceStates.TryGetValue(botUserId, out var voiceState) || !voiceState.ChannelId.HasValue)
+            return NotFound();
+
+        var snapshot = _musicService.GetQueueSnapshot(ulong.Parse(guildId));
+        var remaining = snapshot.Select(s => new QueueItemDto(s.Title, s.Author, s.DurationMs)).ToList();
+        var (nowPlayingTitle, _, _, _) = await _musicService.GetPlaybackStatusAsync(ulong.Parse(guildId), cancellationToken).ConfigureAwait(false);
+        return Ok(new GuildQueueDto(nowPlayingTitle, remaining));
     }
 }
 

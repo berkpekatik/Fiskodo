@@ -17,6 +17,10 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Folder Include="wwwroot\" />
+  </ItemGroup>
+
   <!-- Copy dashboard SPA from fiskoda.dashboard/dist to wwwroot on build -->
   <Target Name="CopyDashboardToWwwroot" BeforeTargets="Build" Condition="Exists('$(ProjectDir)..\fiskoda.dashboard\dist\index.html')">
     <ItemGroup>

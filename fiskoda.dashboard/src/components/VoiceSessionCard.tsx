@@ -1,18 +1,29 @@
+import { formatUptime } from '@/lib/format'
 import type { VoiceConnectionDto } from '@/types/api'
 
 type VoiceSessionCardProps = {
   connection: VoiceConnectionDto
   onDisconnect?: (guildId: string) => void
+  onOpenQueue?: (connection: VoiceConnectionDto) => void
 }
 
-export default function VoiceSessionCard({ connection, onDisconnect }: VoiceSessionCardProps) {
+export default function VoiceSessionCard({ connection, onDisconnect, onOpenQueue }: VoiceSessionCardProps) {
   const guildName = connection.guildName ?? 'Unknown Server'
   const channelName = connection.channelName ?? 'Unknown Channel'
-  const { userCount, playback } = connection
+  const { userCount, playback, voiceUptime } = connection
   const isIdle = !playback.nowPlayingTitle && playback.queueCount === 0
+  const hasQueue = playback.isPlaylistSession || playback.queueCount > 0
+
+  const handleCardClick = () => {
+    if (hasQueue && onOpenQueue) onOpenQueue(connection)
+  }
 
   return (
-    <div className="rounded-xl bg-[#36393f] p-5 flex flex-col gap-4">
+    <div
+      className={`rounded-xl bg-[#36393f] p-5 flex flex-col gap-4 ${hasQueue ? 'cursor-pointer hover:bg-[#40444b] transition-colors' : ''}`}
+      onClick={hasQueue ? handleCardClick : undefined}
+      role={hasQueue ? 'button' : undefined}
+    >
       <div className="flex items-start justify-between">
         <div className="min-w-0 flex-1">
           <p className="text-xs text-[#b9bbbe] flex items-center gap-1.5 mb-1">
@@ -28,6 +39,9 @@ export default function VoiceSessionCard({ connection, onDisconnect }: VoiceSess
           </p>
           <p className="text-xs text-[#72767d] mt-0.5">
             {userCount} {userCount === 1 ? 'user' : 'users'} in channel
+            {voiceUptime != null && voiceUptime !== '' && (
+              <> · In channel: {formatUptime(voiceUptime)}</>
+            )}
           </p>
           {/* Playback */}
           <div className="mt-3 rounded-lg bg-[#2c2f33]/80 px-3 py-2 text-sm">
@@ -64,7 +78,10 @@ export default function VoiceSessionCard({ connection, onDisconnect }: VoiceSess
       {onDisconnect && (
         <button
           type="button"
-          onClick={() => onDisconnect(connection.guildId)}
+          onClick={(e) => {
+            e.stopPropagation()
+            onDisconnect(connection.guildId)
+          }}
           className="w-full py-2.5 rounded-lg bg-[#ed4245] hover:bg-[#c03537] text-white font-medium flex items-center justify-center gap-2 transition-colors"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

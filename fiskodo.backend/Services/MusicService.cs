@@ -21,6 +21,7 @@ public sealed class MusicService
     private readonly HttpClient _httpClient;
     private readonly ConcurrentDictionary<ulong, GuildQueueState> _guildQueues = new();
     private readonly ConcurrentDictionary<ulong, object> _advanceLocks = new();
+    private readonly ConcurrentDictionary<ulong, DateTimeOffset> _guildVoiceJoinedAt = new();
 
     public MusicService(IAudioService audioService, IConfiguration configuration, IHttpClientFactory httpClientFactory, PlaylistMessageStore? playlistMessageStore = null)
     {
@@ -170,6 +171,7 @@ public sealed class MusicService
                     Options.Create(playerOptions),
                     cancellationToken)
                 .ConfigureAwait(false);
+            _guildVoiceJoinedAt[guildId] = DateTimeOffset.UtcNow;
         }
         else
         {
@@ -240,6 +242,7 @@ public sealed class MusicService
                     Options.Create(playerOptions),
                     cancellationToken)
                 .ConfigureAwait(false);
+            _guildVoiceJoinedAt[guildId] = DateTimeOffset.UtcNow;
             state.IsPlaylistSession = true;
         }
         else if (nothingPlaying && player is not null && player.CurrentTrack is null)
@@ -275,6 +278,7 @@ public sealed class MusicService
     {
         _guildQueues.TryRemove(guildId, out _);
         _advanceLocks.TryRemove(guildId, out _);
+        _guildVoiceJoinedAt.TryRemove(guildId, out _);
         _playlistMessageStore?.UnregisterByGuild(guildId);
         var player = await _audioService.Players
             .GetPlayerAsync<LavalinkPlayer>(guildId, cancellationToken)
@@ -463,6 +467,56 @@ public sealed class MusicService
             return (title, state.Queue.Count, state.IsPlaylistSession, state.Shuffle);
         }
     }
+
+    /// <summary>When the bot joined this guild's voice channel (via this service). Null if not tracked.</summary>
+    public DateTimeOffset? GetVoiceJoinedAt(ulong guildId) =>
+        _guildVoiceJoinedAt.TryGetValue(guildId, out var at) ? at : null;
+
+    /// <summary>Snapshot of a single queue item for API (title, optional author and duration in ms).</summary>
+    public record QueueItemSnapshot(string Title, string? Author, long? DurationMs);
+
+    /// <summary>Copy of the current queue for a guild (remaining tracks only). Empty if no queue state.</summary>
+    public IReadOnlyList<QueueItemSnapshot> GetQueueSnapshot(ulong guildId)
+    {
+        if (!_guildQueues.TryGetValue(guildId, out var state))
+            return Array.Empty<QueueItemSnapshot>();
+        lock (state.Lock)
+        {
+            var list = new List<QueueItemSnapshot>(state.Queue.Count);
+            foreach (var track in state.Queue)
+                list.Add(GetTrackSnapshot(track));
+            return list;
+        }
+    }
+
+    private static QueueItemSnapshot GetTrackSnapshot(LavalinkTrack track)
+    {
+        var title = track.Title ?? "Unknown";
+        string? author = null;
+        long? durationMs = null;
+        var type = typeof(LavalinkTrack);
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        var authorProp = type.GetProperty("Author", flags);
+        if (authorProp?.CanRead == true)
+        {
+            try { author = authorProp.GetValue(track) as string; } catch { /* ignore */ }
+        }
+        var durationProp = type.GetProperty("Duration", flags) ?? type.GetProperty("Length", flags);
+        if (durationProp?.CanRead == true)
+        {
+            try
+            {
+                var val = durationProp.GetValue(track);
+                if (val is TimeSpan ts)
+                    durationMs = (long)ts.TotalMilliseconds;
+                else if (val is long l)
+                    durationMs = l;
+            }
+            catch { /* ignore */ }
+        }
+        return new QueueItemSnapshot(title, author, durationMs);
+    }
+
     private async Task<List<LavalinkTrack>> LoadPlaylistTracksAsync(string identifier, CancellationToken cancellationToken)
     {
         var url = $"{_lavalinkBaseAddress}/v4/loadtracks?identifier={Uri.EscapeDataString(identifier)}";

@@ -15,7 +15,19 @@ export type VoiceConnectionDto = {
   channelId: string
   channelName: string | null
   userCount: number
+  voiceUptime: string | null
   playback: PlaybackInfoDto
+}
+
+export type QueueItemDto = {
+  title: string
+  author?: string | null
+  durationMs?: number | null
+}
+
+export type GuildQueueDto = {
+  nowPlayingTitle: string | null
+  remaining: QueueItemDto[]
 }
 
 export type BotStatusDto = {
