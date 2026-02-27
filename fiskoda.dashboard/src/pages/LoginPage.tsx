@@ -36,7 +36,7 @@ export default function LoginPage() {
       const { token, expiresAt } = res.data
       setAuth(token, expiresAt)
       toast.success('Logged in successfully')
-      navigate('/', { replace: true })
+      navigate('/dashboard', { replace: true })
     } catch (err: unknown) {
       const status = err && typeof err === 'object' && 'response' in err
         ? (err as { response?: { status?: number } }).response?.status
