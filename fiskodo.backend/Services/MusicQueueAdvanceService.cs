@@ -72,8 +72,8 @@ public sealed class MusicQueueAdvanceService : BackgroundService
             return;
         try
         {
-            var (nowPlayingTitle, queueCount, shuffle) = await _musicService.GetPlaylistEmbedInfoAsync(guildId, cancellationToken).ConfigureAwait(false);
-            var embed = PlaylistEmbedBuilder.Build(nowPlayingTitle ?? "Nothing", queueCount, shuffle);
+            var (nowPlayingTitle, queueCount, shuffle, artworkUrl) = await _musicService.GetPlaylistEmbedInfoAsync(guildId, cancellationToken).ConfigureAwait(false);
+            var embed = PlaylistEmbedBuilder.Build(nowPlayingTitle ?? "Nothing", queueCount, shuffle, artworkUrl);
             await _client.Rest.ModifyMessageAsync(channelId, messageId, m =>
             {
                 m.Embeds = new[] { embed };

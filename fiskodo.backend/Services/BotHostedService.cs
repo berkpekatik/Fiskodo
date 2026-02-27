@@ -111,8 +111,8 @@ public sealed class BotHostedService : IHostedService
                     return;
             }
 
-            var (nowPlayingTitle, queueCount, shuffle) = await _musicService.GetPlaylistEmbedInfoAsync(guildId.Value).ConfigureAwait(false);
-            var embed = PlaylistEmbedBuilder.Build(nowPlayingTitle ?? "Nothing", queueCount, shuffle);
+            var (nowPlayingTitle, queueCount, shuffle, artworkUrl) = await _musicService.GetPlaylistEmbedInfoAsync(guildId.Value).ConfigureAwait(false);
+            var embed = PlaylistEmbedBuilder.Build(nowPlayingTitle ?? "Nothing", queueCount, shuffle, artworkUrl);
             await interaction.SendResponseAsync(InteractionCallback.ModifyMessage(m =>
             {
                 m.Embeds = new[] { embed };

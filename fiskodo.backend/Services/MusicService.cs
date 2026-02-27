@@ -184,6 +184,93 @@ public sealed class MusicService
         return new PlayResult(firstTrack.Title ?? "Unknown", queuedCount, AddedToQueue: false);
     }
 
+    /// <summary>Result of adding tracks as "next" in queue.</summary>
+    public record AddAsNextResult(string FirstAddedTitle, int AddedCount, int TotalQueueCount);
+
+    /// <summary>Loads tracks from a playlist URL or single track URL and inserts them as the next to play (after current). First added plays first, then the rest in order. If nothing is playing, starts playing the first added.</summary>
+    public async Task<AddAsNextResult> AddTracksAsNextAsync(ulong guildId, ulong voiceChannelId, string url, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            throw new ArgumentException("URL must be provided.", nameof(url));
+
+        var tracksToAdd = await LoadTracksFromUrlAsync(url, cancellationToken).ConfigureAwait(false);
+        if (tracksToAdd.Count == 0)
+            throw new InvalidOperationException("No tracks found or could not load.");
+
+        var state = _guildQueues.GetOrAdd(guildId, _ => new GuildQueueState());
+        var player = await _audioService.Players
+            .GetPlayerAsync<LavalinkPlayer>(guildId, cancellationToken)
+            .ConfigureAwait(false);
+
+        int addedCount = tracksToAdd.Count;
+        string firstTitle = tracksToAdd[0].Title ?? "Unknown";
+        int totalQueueCount;
+
+        lock (state.Lock)
+        {
+            var existing = new List<LavalinkTrack>();
+            while (state.Queue.TryDequeue(out var t))
+                existing.Add(t);
+            foreach (var t in tracksToAdd)
+                state.Queue.Enqueue(t);
+            foreach (var t in existing)
+                state.Queue.Enqueue(t);
+            totalQueueCount = state.Queue.Count;
+        }
+
+        bool nothingPlaying = player is null || (player.CurrentTrack is null && totalQueueCount == addedCount);
+        if (nothingPlaying && player is null)
+        {
+            LavalinkTrack firstTrack;
+            lock (state.Lock)
+            {
+                if (!state.Queue.TryDequeue(out firstTrack!))
+                    throw new InvalidOperationException("No track to play.");
+                totalQueueCount = state.Queue.Count;
+            }
+            var playerOptions = new LavalinkPlayerOptions
+            {
+                InitialTrack = new TrackQueueItem(firstTrack),
+            };
+            await _audioService.Players
+                .JoinAsync<LavalinkPlayer, LavalinkPlayerOptions>(
+                    guildId,
+                    voiceChannelId,
+                    PlayerFactory.Default,
+                    Options.Create(playerOptions),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            state.IsPlaylistSession = true;
+        }
+        else if (nothingPlaying && player is not null && player.CurrentTrack is null)
+        {
+            LavalinkTrack firstTrack;
+            lock (state.Lock)
+            {
+                if (!state.Queue.TryDequeue(out firstTrack!))
+                    return new AddAsNextResult(firstTitle, addedCount, 0);
+                totalQueueCount = state.Queue.Count;
+            }
+            await player.PlayAsync(firstTrack).ConfigureAwait(false);
+            state.IsPlaylistSession = true;
+        }
+
+        return new AddAsNextResult(firstTitle, addedCount, totalQueueCount);
+    }
+
+    /// <summary>Loads one or more tracks from a playlist URL or single track URL. Returns empty list on failure.</summary>
+    private async Task<List<LavalinkTrack>> LoadTracksFromUrlAsync(string url, CancellationToken cancellationToken = default)
+    {
+        var identifier = ResolveQuery(url);
+        if (IsPlaylistUrl(url))
+            return await LoadPlaylistTracksAsync(identifier, cancellationToken).ConfigureAwait(false);
+        var loadOptions = new TrackLoadOptions(SearchMode: TrackSearchMode.YouTube, StrictSearchBehavior.Passthrough);
+        var track = await _audioService.Tracks
+            .LoadTrackAsync(identifier, loadOptions, resolutionScope: default, cancellationToken)
+            .ConfigureAwait(false);
+        return track is null ? new List<LavalinkTrack>() : new List<LavalinkTrack> { track };
+    }
+
     public async Task StopAsync(ulong guildId, CancellationToken cancellationToken = default)
     {
         _guildQueues.TryRemove(guildId, out _);
@@ -346,18 +433,19 @@ public sealed class MusicService
         return true;
     }
 
-    /// <summary>Returns current track title, queue count and shuffle for playlist embed. Used when updating the playlist message.</summary>
-    public async Task<(string? NowPlayingTitle, int QueueCount, bool Shuffle)> GetPlaylistEmbedInfoAsync(ulong guildId, CancellationToken cancellationToken = default)
+    /// <summary>Returns current track title, queue count, shuffle and artwork URL for playlist embed. Used when sending/updating the playlist message.</summary>
+    public async Task<(string? NowPlayingTitle, int QueueCount, bool Shuffle, string? ArtworkUrl)> GetPlaylistEmbedInfoAsync(ulong guildId, CancellationToken cancellationToken = default)
     {
         var player = await _audioService.Players
             .GetPlayerAsync<LavalinkPlayer>(guildId, cancellationToken)
             .ConfigureAwait(false);
         if (!_guildQueues.TryGetValue(guildId, out var state))
-            return (null, 0, false);
+            return (null, 0, false, null);
         lock (state.Lock)
         {
             var title = player?.CurrentTrack?.Title ?? "Nothing";
-            return (title, state.Queue.Count, state.Shuffle);
+            var artwork = player?.CurrentTrack?.ArtworkUri?.ToString();
+            return (title, state.Queue.Count, state.Shuffle, artwork);
         }
     }
 
@@ -375,7 +463,6 @@ public sealed class MusicService
             return (title, state.Queue.Count, state.IsPlaylistSession, state.Shuffle);
         }
     }
-
     private async Task<List<LavalinkTrack>> LoadPlaylistTracksAsync(string identifier, CancellationToken cancellationToken)
     {
         var url = $"{_lavalinkBaseAddress}/v4/loadtracks?identifier={Uri.EscapeDataString(identifier)}";
@@ -389,46 +476,23 @@ public sealed class MusicService
             return new List<LavalinkTrack>();
 
         var rawTracks = loadResult.Data.Tracks;
-        var encodedList = rawTracks
-            .Where(t => !string.IsNullOrEmpty(t.Encoded))
-            .Select(t => t.Encoded!)
-            .ToList();        
-        List<LavalinkTrackData>? decodedTracks = null;
-        if (encodedList.Count > 0)
-        {
-            decodedTracks = await DecodeTracksAsync(encodedList, cancellationToken).ConfigureAwait(false);
-            if (decodedTracks is null)
-                decodedTracks = new List<LavalinkTrackData>();
-        }
-
         var list = new List<LavalinkTrack>();
         var loadOptions = new TrackLoadOptions(SearchMode: TrackSearchMode.YouTube, StrictSearchBehavior.Passthrough);
-        var decodedIndex = 0;
         foreach (var t in rawTracks)
         {
             LavalinkTrack? track = null;
-            LavalinkTrackInfoData? fallbackInfo = null; // decodetracks'ten gelen info; fallback'te uri/identifier/title ile arama için            
-            
-            if (!string.IsNullOrEmpty(t.Encoded) && decodedTracks is not null && decodedIndex < decodedTracks.Count)
-            {
-                var decoded = decodedTracks[decodedIndex++];
-                fallbackInfo = decoded.Info;
-                track = CreateTrackFromEncoded(decoded.Encoded ?? t.Encoded!);
-                if (track is not null && decoded.Info is not null)
-                    ApplyTrackInfo(track, decoded.Info);
-            }
-            else if (!string.IsNullOrEmpty(t.Encoded))
+            // Encoded varsa: direkt TrackData'ya yaz ve loadtracks'in info'su ile metadata doldur.
+            if (!string.IsNullOrEmpty(t.Encoded))
             {
                 track = CreateTrackFromEncoded(t.Encoded!);
-                fallbackInfo = t.Info;
                 if (track is not null && t.Info is not null)
                     ApplyTrackInfo(track, t.Info);
             }
 
-            // Encoded ile track oluşturulamadıysa veya encoded yoksa: endpoint'ten gelen info veya loadtracks info ile uri/identifier/title'dan ara
+            // Encoded ile track oluşturulamadıysa veya encoded yoksa: loadtracks info ile uri/identifier/title'dan ara
             if (track is null)
             {
-                var info = fallbackInfo ?? t.Info;
+                var info = t.Info;
                 if (!string.IsNullOrEmpty(info?.Uri))
                     track = await _audioService.Tracks
                         .LoadTrackAsync(info.Uri, loadOptions, resolutionScope: default, cancellationToken)
@@ -452,22 +516,6 @@ public sealed class MusicService
             if (track is not null)
                 list.Add(track);
         }
-        return list;
-    }
-
-    /// <summary>POST /v4/decodetracks — decode multiple encoded tracks in one request. Returns same order as request.</summary>
-    private async Task<List<LavalinkTrackData>?> DecodeTracksAsync(List<string> encodedTracks, CancellationToken cancellationToken)
-    {
-        if (encodedTracks.Count == 0)
-            return new List<LavalinkTrackData>();
-        var url = $"{_lavalinkBaseAddress}/v4/decodetracks";
-        using var request = new HttpRequestMessage(HttpMethod.Post, url);
-        request.Headers.TryAddWithoutValidation("Authorization", _lavalinkPassphrase);
-        request.Content = JsonContent.Create(encodedTracks);
-        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-        var list = await response.Content.ReadFromJsonAsync<List<LavalinkTrackData>>(options, cancellationToken).ConfigureAwait(false);
         return list;
     }
 
@@ -522,35 +570,66 @@ public sealed class MusicService
         return null;
     }
 
-    /// <summary>Decodetracks/loadtracks info ile LavalinkTrack metadata (Title, Author, vb.) doldurur; "Unknown" yerine doğru bilgi görünür.</summary>
+    /// <summary>LavalinkTrackInfoData (loadtracks rawTracks.Info) içeriğini LavalinkTrack'e yazar. Property isimleri farklı olabilir (örn. ArtworkUrl→ArtworkUri, Length→Duration); birden fazla isim denenir.</summary>
     private static void ApplyTrackInfo(LavalinkTrack track, LavalinkTrackInfoData info)
     {
         if (info is null) return;
         var type = typeof(LavalinkTrack);
         const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-        void Set(string name, object? value, Type? valueType = null)
+
+        void SetValue(string propertyName, object? value, Type? valueType = null)
         {
             if (value is null) return;
-            var prop = type.GetProperty(name, flags);
+            var v = valueType is not null && value.GetType() != valueType ? Convert.ChangeType(value, valueType) : value;
+            var prop = type.GetProperty(propertyName, flags);
             if (prop?.CanWrite == true)
             {
-                var v = valueType is not null && value.GetType() != valueType ? Convert.ChangeType(value, valueType) : value;
                 try { prop.SetValue(track, v); } catch { /* ignore */ }
                 return;
             }
-            var field = type.GetField("<" + name + ">k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+            var field = type.GetField("<" + propertyName + ">k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
             if (field is not null)
-            {
-                var v = valueType is not null && value.GetType() != valueType ? Convert.ChangeType(value, valueType) : value;
                 try { field.SetValue(track, v); } catch { /* ignore */ }
+        }
+
+        void SetOneOf(string[] propertyNames, object? value, Type? valueType = null)
+        {
+            if (value is null) return;
+            var v = valueType is not null && value.GetType() != valueType ? Convert.ChangeType(value, valueType) : value;
+            foreach (var name in propertyNames)
+            {
+                var prop = type.GetProperty(name, flags);
+                if (prop?.CanWrite == true)
+                {
+                    try { prop.SetValue(track, v); } catch { /* ignore */ }
+                    return;
+                }
+                var field = type.GetField("<" + name + ">k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field is not null)
+                {
+                    try { field.SetValue(track, v); } catch { /* ignore */ }
+                    return;
+                }
             }
         }
-        Set("Title", info.Title);
-        Set("Author", info.Author);
-        Set("Identifier", info.Identifier);
-        Set("Uri", info.Uri);
+
+        SetValue("Title", info.Title);
+        SetValue("Author", info.Author);
+        SetValue("Identifier", info.Identifier);
+        SetValue("Uri", info.Uri);
         if (info.Length > 0)
-            Set("Duration", TimeSpan.FromMilliseconds(info.Length), typeof(TimeSpan));
+            SetOneOf(new[] { "Duration", "Length" }, TimeSpan.FromMilliseconds(info.Length), typeof(TimeSpan));
+        if (!string.IsNullOrEmpty(info.ArtworkUrl))
+        {
+            if (Uri.TryCreate(info.ArtworkUrl, UriKind.Absolute, out var artworkUri))
+                SetOneOf(new[] { "ArtworkUri", "ArtworkUrl" }, artworkUri);
+            SetOneOf(new[] { "ArtworkUri", "ArtworkUrl" }, info.ArtworkUrl);
+        }
+        SetOneOf(new[] { "SourceName", "Source" }, info.SourceName);
+        SetValue("IsSeekable", info.IsSeekable);
+        SetValue("IsLiveStream", info.IsStream);
+        SetOneOf(new[] { "StartPosition", "Position" }, info.Position > 0 ? TimeSpan.FromMilliseconds(info.Position) : null, typeof(TimeSpan));
+        SetValue("Isrc", info.Isrc);
     }
 
     private static bool IsPlaylistUrl(string queryOrUrl)

@@ -4,17 +4,22 @@ using NetCord.Rest;
 
 namespace Fiskodo.Services;
 
-/// <summary>Builds the playlist control embed (title, now playing, queue count, shuffle). Used when sending and when updating after button click.</summary>
+/// <summary>Builds the playlist control embed (title, now playing, queue count, shuffle, optional artwork thumbnail). Used when sending and when updating after button click.</summary>
 public static class PlaylistEmbedBuilder
 {
-    public static EmbedProperties Build(string nowPlayingTitle, int queueCount, bool shuffle)
+    public static EmbedProperties Build(string nowPlayingTitle, int queueCount, bool shuffle, string? artworkUrl = null)
     {
         var description = $"Now playing: **{nowPlayingTitle}**";
         var queueText = queueCount == 0 ? "Queue: empty" : $"Queue: {queueCount} track(s)";
         var shuffleText = shuffle ? "Shuffle: on" : "Shuffle: off";
-        return new EmbedProperties()
+        var embed = new EmbedProperties()
             .WithTitle("Playlist")
             .WithDescription($"{description}\n{queueText}\n{shuffleText}");
+        if (!string.IsNullOrWhiteSpace(artworkUrl))
+        {
+            embed = embed.WithThumbnail(artworkUrl);
+        }
+        return embed;
     }
 
     /// <summary>Action row with Previous, Next, Shuffle buttons for playlist control message.</summary>
