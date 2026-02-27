@@ -48,6 +48,7 @@ project.fragment.lock.json
 artifacts/
 appsettings.Development.json
 appsettings.*.local.json
+fiskodo.backend/appsettings.Local.json
 *.db
 *.db-shm
 *.db-wal

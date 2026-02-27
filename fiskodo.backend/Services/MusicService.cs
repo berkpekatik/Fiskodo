@@ -392,8 +392,7 @@ public sealed class MusicService
         var encodedList = rawTracks
             .Where(t => !string.IsNullOrEmpty(t.Encoded))
             .Select(t => t.Encoded!)
-            .ToList();
-
+            .ToList();        
         List<LavalinkTrackData>? decodedTracks = null;
         if (encodedList.Count > 0)
         {
@@ -409,7 +408,7 @@ public sealed class MusicService
         {
             LavalinkTrack? track = null;
             LavalinkTrackInfoData? fallbackInfo = null; // decodetracks'ten gelen info; fallback'te uri/identifier/title ile arama için            
-
+            
             if (!string.IsNullOrEmpty(t.Encoded) && decodedTracks is not null && decodedIndex < decodedTracks.Count)
             {
                 var decoded = decodedTracks[decodedIndex++];
