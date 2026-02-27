@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { useAuthStore } from '@/stores/authStore'
 
-const API_BASE = import.meta.env.VITE_API_URL ?? 'https://localhost:50456'
+const API_BASE = import.meta.env.VITE_API_URL ?? 'https://discord.vnoisy.dev'
 
 export const api = axios.create({
   baseURL: API_BASE,

@@ -1,5 +1,7 @@
+using System.Buffers.Text;
 using System.Collections.Concurrent;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using Lavalink4NET;
 using Lavalink4NET.Players;
@@ -386,40 +388,121 @@ public sealed class MusicService
         if (loadResult?.Data?.Tracks is null || loadResult.Data.Tracks.Count == 0)
             return new List<LavalinkTrack>();
 
+        var rawTracks = loadResult.Data.Tracks;
+        var encodedList = rawTracks
+            .Where(t => !string.IsNullOrEmpty(t.Encoded))
+            .Select(t => t.Encoded!)
+            .ToList();
+
+        List<LavalinkTrackData>? decodedTracks = null;
+        if (encodedList.Count > 0)
+        {
+            decodedTracks = await DecodeTracksAsync(encodedList, cancellationToken).ConfigureAwait(false);
+            if (decodedTracks is null)
+                decodedTracks = new List<LavalinkTrackData>();
+        }
+
         var list = new List<LavalinkTrack>();
         var loadOptions = new TrackLoadOptions(SearchMode: TrackSearchMode.YouTube, StrictSearchBehavior.Passthrough);
-        foreach (var t in loadResult.Data.Tracks)
+        var decodedIndex = 0;
+        foreach (var t in rawTracks)
         {
             LavalinkTrack? track = null;
-            if (!string.IsNullOrEmpty(t.Info?.Uri))
+            LavalinkTrackInfoData? fallbackInfo = null; // decodetracks'ten gelen info; fallback'te uri/identifier/title ile arama için            
+
+            if (!string.IsNullOrEmpty(t.Encoded) && decodedTracks is not null && decodedIndex < decodedTracks.Count)
             {
-                track = await _audioService.Tracks
-                    .LoadTrackAsync(t.Info.Uri, loadOptions, resolutionScope: default, cancellationToken)
-                    .ConfigureAwait(false);
+                var decoded = decodedTracks[decodedIndex++];
+                fallbackInfo = decoded.Info;
+                track = CreateTrackFromEncoded(decoded.Encoded ?? t.Encoded!);
+                if (track is not null && decoded.Info is not null)
+                    ApplyTrackInfo(track, decoded.Info);
             }
-            if (track is null && !string.IsNullOrEmpty(t.Info?.Identifier))
+            else if (!string.IsNullOrEmpty(t.Encoded))
             {
-                var ytUrl = "https://www.youtube.com/watch?v=" + t.Info.Identifier;
-                track = await _audioService.Tracks
-                    .LoadTrackAsync(ytUrl, loadOptions, resolutionScope: default, cancellationToken)
-                    .ConfigureAwait(false);
+                track = CreateTrackFromEncoded(t.Encoded!);
+                fallbackInfo = t.Info;
+                if (track is not null && t.Info is not null)
+                    ApplyTrackInfo(track, t.Info);
             }
-            if (track is null && !string.IsNullOrEmpty(t.Encoded))
+
+            // Encoded ile track oluşturulamadıysa veya encoded yoksa: endpoint'ten gelen info veya loadtracks info ile uri/identifier/title'dan ara
+            if (track is null)
             {
-                track = CreateTrackFromEncoded(t.Encoded);
+                var info = fallbackInfo ?? t.Info;
+                if (!string.IsNullOrEmpty(info?.Uri))
+                    track = await _audioService.Tracks
+                        .LoadTrackAsync(info.Uri, loadOptions, resolutionScope: default, cancellationToken)
+                        .ConfigureAwait(false);
+                if (track is null && !string.IsNullOrEmpty(info?.Identifier))
+                {
+                    var ytUrl = "https://www.youtube.com/watch?v=" + info.Identifier;
+                    track = await _audioService.Tracks
+                        .LoadTrackAsync(ytUrl, loadOptions, resolutionScope: default, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                if (track is null && !string.IsNullOrEmpty(info?.Title))
+                {
+                    var searchQuery = info.Title;
+                    track = await _audioService.Tracks
+                        .LoadTrackAsync(searchQuery, loadOptions, resolutionScope: default, cancellationToken)
+                        .ConfigureAwait(false);
+                }
             }
+
             if (track is not null)
                 list.Add(track);
         }
         return list;
     }
 
+    /// <summary>POST /v4/decodetracks — decode multiple encoded tracks in one request. Returns same order as request.</summary>
+    private async Task<List<LavalinkTrackData>?> DecodeTracksAsync(List<string> encodedTracks, CancellationToken cancellationToken)
+    {
+        if (encodedTracks.Count == 0)
+            return new List<LavalinkTrackData>();
+        var url = $"{_lavalinkBaseAddress}/v4/decodetracks";
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.TryAddWithoutValidation("Authorization", _lavalinkPassphrase);
+        request.Content = JsonContent.Create(encodedTracks);
+        using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var list = await response.Content.ReadFromJsonAsync<List<LavalinkTrackData>>(options, cancellationToken).ConfigureAwait(false);
+        return list;
+    }
+
+    /// <summary>Creates a LavalinkTrack from Lavalink's base64 encoded track data. Encoded is Lavaplayer binary format (not human-readable); we only pass it as-is to TrackData for play. Do not decode locally.</summary>
     private static LavalinkTrack? CreateTrackFromEncoded(string encoded)
     {
         if (string.IsNullOrWhiteSpace(encoded))
             return null;
         var type = typeof(LavalinkTrack);
         const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+
+        // Lavalink4NET: CreateTrack sets TrackData = track.Data (the encoded base64). Use TrackData, not Identifier.
+        try
+        {
+            var emptyCtor = type.GetConstructor(flags, Type.EmptyTypes);
+            if (emptyCtor is not null)
+            {
+                var track = (LavalinkTrack)emptyCtor.Invoke(null);
+                var trackDataProp = type.GetProperty("TrackData", flags);
+                if (trackDataProp?.CanWrite == true)
+                {
+                    trackDataProp.SetValue(track, encoded);
+                    return track;
+                }
+                var trackDataField = type.GetField("_trackData", BindingFlags.NonPublic | BindingFlags.Instance)
+                    ?? type.GetField("<TrackData>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (trackDataField is not null)
+                {
+                    trackDataField.SetValue(track, encoded);
+                    return track;
+                }
+            }
+        }
+        catch { /* ignore */ }
 
         try
         {
@@ -437,30 +520,38 @@ public sealed class MusicService
         }
         catch { /* ignore */ }
 
-        try
+        return null;
+    }
+
+    /// <summary>Decodetracks/loadtracks info ile LavalinkTrack metadata (Title, Author, vb.) doldurur; "Unknown" yerine doğru bilgi görünür.</summary>
+    private static void ApplyTrackInfo(LavalinkTrack track, LavalinkTrackInfoData info)
+    {
+        if (info is null) return;
+        var type = typeof(LavalinkTrack);
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        void Set(string name, object? value, Type? valueType = null)
         {
-            var emptyCtor = type.GetConstructor(flags, Type.EmptyTypes);
-            if (emptyCtor is not null)
+            if (value is null) return;
+            var prop = type.GetProperty(name, flags);
+            if (prop?.CanWrite == true)
             {
-                var track = (LavalinkTrack)emptyCtor.Invoke(null);
-                var prop = type.GetProperty("Identifier", flags);
-                if (prop?.CanWrite == true)
-                {
-                    prop.SetValue(track, encoded);
-                    return track;
-                }
-                var field = type.GetField("_identifier", BindingFlags.NonPublic | BindingFlags.Instance)
-                    ?? type.GetField("<Identifier>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
-                if (field is not null)
-                {
-                    field.SetValue(track, encoded);
-                    return track;
-                }
+                var v = valueType is not null && value.GetType() != valueType ? Convert.ChangeType(value, valueType) : value;
+                try { prop.SetValue(track, v); } catch { /* ignore */ }
+                return;
+            }
+            var field = type.GetField("<" + name + ">k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field is not null)
+            {
+                var v = valueType is not null && value.GetType() != valueType ? Convert.ChangeType(value, valueType) : value;
+                try { field.SetValue(track, v); } catch { /* ignore */ }
             }
         }
-        catch { /* ignore */ }
-
-        return null;
+        Set("Title", info.Title);
+        Set("Author", info.Author);
+        Set("Identifier", info.Identifier);
+        Set("Uri", info.Uri);
+        if (info.Length > 0)
+            Set("Duration", TimeSpan.FromMilliseconds(info.Length), typeof(TimeSpan));
     }
 
     private static bool IsPlaylistUrl(string queryOrUrl)
@@ -510,6 +601,7 @@ public sealed class MusicService
         public List<LavalinkTrackData>? Tracks { get; set; }
     }
 
+    /// <summary>Matches Lavalink /v4/decodetracks and loadtracks response: encoded + info (+ pluginInfo, userData ignored).</summary>
     private sealed class LavalinkTrackData
     {
         [System.Text.Json.Serialization.JsonPropertyName("encoded")]
@@ -519,12 +611,40 @@ public sealed class MusicService
         public LavalinkTrackInfoData? Info { get; set; }
     }
 
+    /// <summary>Matches Lavalink track info: identifier, title, author, length, uri, sourceName, artworkUrl, isrc, isSeekable, isStream, position.</summary>
     private sealed class LavalinkTrackInfoData
     {
+        [System.Text.Json.Serialization.JsonPropertyName("identifier")]
+        public string? Identifier { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("title")]
+        public string? Title { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("author")]
+        public string? Author { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("length")]
+        public long Length { get; set; }
+
         [System.Text.Json.Serialization.JsonPropertyName("uri")]
         public string? Uri { get; set; }
 
-        [System.Text.Json.Serialization.JsonPropertyName("identifier")]
-        public string? Identifier { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("sourceName")]
+        public string? SourceName { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("artworkUrl")]
+        public string? ArtworkUrl { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("isrc")]
+        public string? Isrc { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("isSeekable")]
+        public bool IsSeekable { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("isStream")]
+        public bool IsStream { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("position")]
+        public long Position { get; set; }
     }
 }
