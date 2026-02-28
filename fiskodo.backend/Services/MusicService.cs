@@ -52,7 +52,8 @@ public sealed class MusicService
             throw new InvalidOperationException("A playlist is currently playing. Use /stop first.");
 
         var loadIdentifier = ResolveQuery(queryOrUrl);
-        var loadOptions = new TrackLoadOptions(SearchMode: TrackSearchMode.YouTube, StrictSearchBehavior.Passthrough);
+        var searchMode = loadIdentifier.Contains("spotify", StringComparison.OrdinalIgnoreCase) ? TrackSearchMode.Spotify : TrackSearchMode.YouTube;
+        var loadOptions = new TrackLoadOptions(SearchMode: searchMode, StrictSearchBehavior.Passthrough);
         var track = await _audioService.Tracks
             .LoadTrackAsync(loadIdentifier, loadOptions, resolutionScope: default, cancellationToken)
             .ConfigureAwait(false);
@@ -127,7 +128,7 @@ public sealed class MusicService
         if (string.IsNullOrWhiteSpace(playlistUrl))
             throw new ArgumentException("Playlist URL must be provided.", nameof(playlistUrl));
         if (!IsPlaylistUrl(playlistUrl))
-            throw new InvalidOperationException("Not a playlist URL. Use /play for a single track, or provide a YouTube playlist link (e.g. with list=).");
+            throw new InvalidOperationException("Not a playlist URL. Use /play for a single track, or provide a YouTube/Spotify playlist link.");
 
         var loadIdentifier = ResolveQuery(playlistUrl);
         var tracksToPlay = await LoadPlaylistTracksAsync(loadIdentifier, cancellationToken).ConfigureAwait(false);
@@ -267,7 +268,8 @@ public sealed class MusicService
         var identifier = ResolveQuery(url);
         if (IsPlaylistUrl(url))
             return await LoadPlaylistTracksAsync(identifier, cancellationToken).ConfigureAwait(false);
-        var loadOptions = new TrackLoadOptions(SearchMode: TrackSearchMode.YouTube, StrictSearchBehavior.Passthrough);
+        var searchMode = identifier.Contains("spotify", StringComparison.OrdinalIgnoreCase) ? TrackSearchMode.Spotify : TrackSearchMode.YouTube;
+        var loadOptions = new TrackLoadOptions(SearchMode: searchMode, StrictSearchBehavior.Passthrough);
         var track = await _audioService.Tracks
             .LoadTrackAsync(identifier, loadOptions, resolutionScope: default, cancellationToken)
             .ConfigureAwait(false);
@@ -531,7 +533,9 @@ public sealed class MusicService
 
         var rawTracks = loadResult.Data.Tracks;
         var list = new List<LavalinkTrack>();
-        var loadOptions = new TrackLoadOptions(SearchMode: TrackSearchMode.YouTube, StrictSearchBehavior.Passthrough);
+        var isSpotify = identifier.Contains("spotify", StringComparison.OrdinalIgnoreCase);
+        var searchMode = isSpotify ? TrackSearchMode.Spotify : TrackSearchMode.YouTube;
+        var loadOptions = new TrackLoadOptions(SearchMode: searchMode, StrictSearchBehavior.Passthrough);
         foreach (var t in rawTracks)
         {
             LavalinkTrack? track = null;
@@ -551,7 +555,8 @@ public sealed class MusicService
                     track = await _audioService.Tracks
                         .LoadTrackAsync(info.Uri, loadOptions, resolutionScope: default, cancellationToken)
                         .ConfigureAwait(false);
-                if (track is null && !string.IsNullOrEmpty(info?.Identifier))
+                // info.Identifier ile YouTube URL sadece YouTube playlist için geçerli (Spotify'da identifier YouTube ID değil)
+                if (track is null && !isSpotify && !string.IsNullOrEmpty(info?.Identifier))
                 {
                     var ytUrl = "https://www.youtube.com/watch?v=" + info.Identifier;
                     track = await _audioService.Tracks
@@ -560,9 +565,8 @@ public sealed class MusicService
                 }
                 if (track is null && !string.IsNullOrEmpty(info?.Title))
                 {
-                    var searchQuery = info.Title;
                     track = await _audioService.Tracks
-                        .LoadTrackAsync(searchQuery, loadOptions, resolutionScope: default, cancellationToken)
+                        .LoadTrackAsync(info.Title, loadOptions, resolutionScope: default, cancellationToken)
                         .ConfigureAwait(false);
                 }
             }
@@ -690,8 +694,10 @@ public sealed class MusicService
     {
         if (string.IsNullOrWhiteSpace(queryOrUrl))
             return false;
-        return queryOrUrl.Contains("list=", StringComparison.OrdinalIgnoreCase) ||
-               queryOrUrl.Contains("playlist", StringComparison.OrdinalIgnoreCase);
+        var q = queryOrUrl.AsSpan().Trim();
+        return q.Contains("list=", StringComparison.OrdinalIgnoreCase) ||
+               q.Contains("/playlist/", StringComparison.OrdinalIgnoreCase) ||
+               (q.Contains("spotify", StringComparison.OrdinalIgnoreCase) && q.Contains("/album/", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string ResolveQuery(string queryOrUrl)
